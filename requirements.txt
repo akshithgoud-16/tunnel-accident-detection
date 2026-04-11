@@ -1,0 +1,7 @@
+ultralytics
+opencv-python
+fastapi
+uvicorn
+deep-sort-realtime
+psycopg2-binary
+requests
