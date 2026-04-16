@@ -4,4 +4,6 @@ fastapi
 uvicorn
 deep-sort-realtime
 psycopg2-binary
+SQLAlchemy
 requests
+python-multipart
