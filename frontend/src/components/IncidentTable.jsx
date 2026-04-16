@@ -3,7 +3,7 @@ export default function IncidentTable({ events = [] }) {
     <section className="table-card">
       <div className="table-head">
         <h2>Recent events</h2>
-        <span>Video analysis output</span>
+        <span>All four camera feeds</span>
       </div>
       <div className="table-body">
         {events.length === 0 ? (
@@ -13,7 +13,8 @@ export default function IncidentTable({ events = [] }) {
         ) : (
           events.map((event) => (
             <div key={event.id} className="table-row">
-              <strong>{event.event_type}</strong>
+              <strong>{event.camera_label ?? 'Camera'}</strong>
+              <span>{event.event_type}</span>
               <span>Track {event.track_id ?? '-'}</span>
               <span>{Math.round(event.timestamp_ms / 1000)}s</span>
               <span>{event.details ? JSON.stringify(event.details) : '-'}</span>

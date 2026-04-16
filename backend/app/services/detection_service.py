@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import math
 import uuid
 from collections.abc import Callable
+from collections import deque
 from pathlib import Path
 
 import cv2
@@ -15,7 +17,23 @@ from app.video.processor import get_center, get_lines, point_side
 
 settings = get_settings()
 MODEL_PATH = Path(__file__).resolve().parent.parent / "ml" / "weights" / "yolov8m.pt"
-DEFAULT_PLAYBACK_FPS = 12.0
+DEFAULT_PLAYBACK_FPS = 30.0
+
+
+def _motion_metrics(points: deque[tuple[int, int]]) -> tuple[float, float]:
+    if len(points) < 2:
+        return 0.0, 0.0
+
+    path_distance = 0.0
+    previous = points[0]
+    for current in list(points)[1:]:
+        path_distance += math.hypot(current[0] - previous[0], current[1] - previous[1])
+        previous = current
+
+    first = points[0]
+    last = points[-1]
+    net_displacement = math.hypot(last[0] - first[0], last[1] - first[1])
+    return path_distance, net_displacement
 
 
 def save_uploaded_video(content: bytes, original_filename: str) -> Path:
@@ -51,7 +69,7 @@ def get_stream_playback_fps(source_fps: float | int | None) -> float:
     if not source_fps or float(source_fps) <= 0:
         return DEFAULT_PLAYBACK_FPS
 
-    # Avoid always playing at full original-speed for analyzed stream playback.
+    # Cap playback at a higher value so movement/stops are visible sooner in stream.
     return min(float(source_fps), DEFAULT_PLAYBACK_FPS)
 
 
@@ -67,11 +85,25 @@ def process_video_upload(
     cap = cv2.VideoCapture(str(video_path))
     analyzed_path = get_analyzed_video_path(video_path)
     writer: cv2.VideoWriter | None = None
+    source_fps = cap.get(cv2.CAP_PROP_FPS) or 0
+    analysis_fps = float(source_fps) if source_fps and source_fps > 0 else 24.0
+
+    # FPS-aware stop detection thresholds to avoid frame-rate dependent behavior.
+    stop_min_seconds = 2.2
+    stop_window_seconds = 1.2
+    min_stop_frames = max(8, int(analysis_fps * stop_min_seconds))
+    window_frames = max(6, int(analysis_fps * stop_window_seconds))
+    stop_jitter_px = 1.2
+    stop_release_px = 4.0
+    max_window_net_displacement = 6.0
+    max_window_path_distance = max(8.0, window_frames * 0.8)
+    max_stationary_speed = 7.0
 
     prev_pos: dict[int, tuple[int, int]] = {}
     wrong_way_flags: dict[int, bool] = {}
     stop_flags: dict[int, bool] = {}
     stop_frames: dict[int, int] = {}
+    track_motion: dict[int, deque[tuple[int, int]]] = {}
     wrong_way_count = 0
     stop_count = 0
     event_summary: list[dict[str, object]] = []
@@ -85,10 +117,8 @@ def process_video_upload(
 
         if writer is None:
             frame_h, frame_w = frame.shape[:2]
-            fps = cap.get(cv2.CAP_PROP_FPS) or 0
-            output_fps = fps if fps > 0 else 24.0
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-            writer = cv2.VideoWriter(str(analyzed_path), fourcc, output_fps, (frame_w, frame_h))
+            writer = cv2.VideoWriter(str(analyzed_path), fourcc, analysis_fps, (frame_w, frame_h))
 
         last_frame_ms = int(cap.get(cv2.CAP_PROP_POS_MSEC) or 0)
         h, w, _ = frame.shape
@@ -123,19 +153,34 @@ def process_video_upload(
                 wrong_way_flags[track_id] = False
                 stop_flags[track_id] = False
                 stop_frames[track_id] = 0
+                history = deque(maxlen=window_frames)
+                history.append((cx, cy))
+                track_motion[track_id] = history
                 continue
 
             px, py = prev_pos[track_id]
             prev_pos[track_id] = (cx, cy)
 
             moved = abs(cx - px) + abs(cy - py)
-            if moved <= 3:
+            if moved <= stop_jitter_px:
                 stop_frames[track_id] = stop_frames.get(track_id, 0) + 1
             else:
                 stop_frames[track_id] = 0
-                stop_flags[track_id] = False
 
-            if stop_frames[track_id] == 20:
+            history = track_motion.setdefault(track_id, deque(maxlen=window_frames))
+            history.append((cx, cy))
+            window_path, window_net = _motion_metrics(history)
+            window_speed = window_path / stop_window_seconds
+
+            is_stop_candidate = (
+                stop_frames[track_id] >= min_stop_frames
+                and window_path <= max_window_path_distance
+                and window_net <= max_window_net_displacement
+                and window_speed <= max_stationary_speed
+                and moved <= stop_jitter_px
+            )
+
+            if is_stop_candidate and not stop_flags.get(track_id, False):
                 stop_flags[track_id] = True
                 stop_count += 1
                 event_summary.append({"type": "stop", "track_id": track_id, "timestamp_ms": last_frame_ms})
@@ -144,9 +189,15 @@ def process_video_upload(
                         event_type="stop",
                         track_id=track_id,
                         timestamp_ms=last_frame_ms,
-                        details={"movement": moved},
+                        details={
+                            "movement": moved,
+                            "window_path": round(window_path, 2),
+                            "window_net": round(window_net, 2),
+                        },
                     )
                 )
+            elif not is_stop_candidate and moved >= stop_release_px:
+                stop_flags[track_id] = False
 
             for p1, p2 in lines:
                 prev_side = point_side(px, py, *p1, *p2)

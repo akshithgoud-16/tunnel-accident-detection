@@ -8,14 +8,47 @@ export async function fetchDashboardSummary() {
   return response.json()
 }
 
-export async function uploadVideo(file) {
-  const formData = new FormData()
-  formData.append('file', file)
+export async function fetchCameraSources() {
+  const response = await fetch('/api/v1/cameras')
+  return response.json()
+}
 
-  const response = await fetch('/api/v1/videos/upload', {
+export async function startCameraAnalysis(cameraId) {
+  const response = await fetch(`/api/v1/videos/analyze/${cameraId}`, {
     method: 'POST',
-    body: formData,
   })
+
+  if (!response.ok) {
+    throw new Error(`Failed to start analysis for ${cameraId} (${response.status})`)
+  }
+
+  return response.json()
+}
+
+export async function fetchRun(runId) {
+  if (runId == null) {
+    throw new Error('runId is required')
+  }
+
+  const response = await fetch(`/api/v1/runs/${runId}`)
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch run ${runId} (${response.status})`)
+  }
+
+  return response.json()
+}
+
+export async function fetchRunEvents(runId) {
+  if (runId == null || runId === 'undefined') {
+    return []
+  }
+
+  const response = await fetch(`/api/v1/events?run_id=${encodeURIComponent(runId)}`)
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch events for run ${runId} (${response.status})`)
+  }
 
   return response.json()
 }
